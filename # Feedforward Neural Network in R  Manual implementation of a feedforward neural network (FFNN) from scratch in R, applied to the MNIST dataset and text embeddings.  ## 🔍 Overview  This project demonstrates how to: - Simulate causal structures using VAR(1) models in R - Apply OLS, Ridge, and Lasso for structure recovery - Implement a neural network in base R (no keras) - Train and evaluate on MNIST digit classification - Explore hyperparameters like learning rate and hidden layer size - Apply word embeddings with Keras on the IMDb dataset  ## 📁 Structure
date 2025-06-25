@@ -1,0 +1,706 @@
+# feedforward-r-network_
+Manual implementation of a Feedforward Neural Network in R, applied to MNIST and text embeddings.
+
+# ============================================
+# Synthetic Causal Graph Simulation using VAR(1)
+# ============================================
+
+# Required libraries
+library(MASS)     # For multivariate normal noise (mvrnorm)
+library(Matrix)   # (Optional) For sparse matrix operations
+library(igraph)   # For graph visualization
+
+# Set seed for reproducibility
+set.seed(123)
+
+# -----------------------------
+# Step 1 – Define simulation parameters
+# -----------------------------
+n_obs <- 500      # Number of observations (time points)
+n_vars <- 10      # Number of variables (nodes)
+p <- 1            # VAR model order (here, VAR(1))
+
+# -----------------------------
+# Step 2 – Create sparse coefficient matrix A1
+# -----------------------------
+sparsity <- 0.2                         # Proportion of non-zero connections
+n_connections <- floor(n_vars^2 * sparsity)
+
+# Initialize A1 with zeros
+A1 <- matrix(0, nrow = n_vars, ncol = n_vars)
+
+# Randomly activate connections
+active_indices <- sample(1:(n_vars^2), n_connections, replace = FALSE)
+A1[active_indices] <- runif(n_connections, min = -0.8, max = 0.8)
+
+# -----------------------------
+# Step 3 – Simulate multivariate Gaussian noise
+# -----------------------------
+Sigma <- diag(n_vars)  # Identity covariance matrix (independent noise)
+epsilon <- MASS::mvrnorm(n = n_obs, mu = rep(0, n_vars), Sigma = Sigma)
+
+# -----------------------------
+# Step 4 – Initialize data matrix X(t)
+# -----------------------------
+X <- matrix(0, nrow = n_obs, ncol = n_vars)
+X[1, ] <- rnorm(n_vars)  # Random initial condition
+
+# -----------------------------
+# Step 5 – Simulate VAR(1) process
+# -----------------------------
+for (t in 2:n_obs) {
+  X[t, ] <- A1 %*% X[t - 1, ] + epsilon[t, ]
+}
+
+# -----------------------------
+# Step 6 – Extract ground-truth adjacency matrix
+# -----------------------------
+adjacency_true <- (A1 != 0) * 1  # 1 if there is a connection, 0 otherwise
+
+# Display the true coefficient matrix
+cat("✅ Ground-truth coefficient matrix (A1):\n")
+print(round(A1, 2))
+
+# -----------------------------
+# Step 7 – Visualize the causal network (optional)
+# -----------------------------
+g <- graph_from_adjacency_matrix(adjacency_true, mode = "directed")
+plot(g, 
+     main = "True Causal Network Structure (VAR)",
+     vertex.color = "lightblue",
+     vertex.label.cex = 0.9,
+     edge.arrow.size = 0.5)
+
+# =============================
+# PHASE 2 – Estimation using Ordinary Least Squares (OLS)
+# =============================
+
+# Initialize matrix to store estimated coefficients
+A1_ols <- matrix(0, nrow = n_vars, ncol = n_vars)
+
+# Prepare the lagged dataset: predictors X(t-1), responses X(t)
+X_lag1 <- X[1:(n_obs - 1), ]       # Regressors (lagged values)
+X_response <- X[2:n_obs, ]         # Responses (current values)
+
+# Estimate one linear model per variable (node)
+for (i in 1:n_vars) {
+  model <- lm(X_response[, i] ~ X_lag1)
+  coefficients <- coef(model)[-1]  # Exclude intercept
+  A1_ols[i, ] <- coefficients      # Store estimated coefficients
+}
+
+# Construct estimated binary adjacency matrix (1 if connection ≠ 0)
+adjacency_ols <- (A1_ols != 0) * 1
+
+# Show results
+cat("\n✅ Estimated coefficient matrix via OLS:\n")
+print(round(A1_ols, 2))
+
+cat("\n📌 Binary adjacency matrix (OLS):\n")
+print(adjacency_ols)
+
+# =============================
+# PHASE 3 – Estimation using Ridge and Lasso Regression
+# =============================
+
+library(glmnet)
+
+# Prepare input matrices for glmnet (must be numeric and without intercepts)
+X_lag1_matrix <- as.matrix(X[1:(n_obs - 1), ])      # Predictor matrix
+X_response_matrix <- as.matrix(X[2:n_obs, ])        # Response matrix
+
+# Initialize matrices to store estimated coefficients
+A1_ridge <- matrix(0, nrow = n_vars, ncol = n_vars)
+A1_lasso <- matrix(0, nrow = n_vars, ncol = n_vars)
+
+# Regularization strength (lambda); can be tuned later via cross-validation
+lambda_value <- 0.1
+
+# Estimate one model per response variable (one regression per row)
+for (i in 1:n_vars) {
+  y_i <- X_response_matrix[, i]
+  
+  # Ridge Regression (L2 regularization): alpha = 0
+  fit_ridge <- glmnet(
+    X_lag1_matrix, y_i,
+    alpha = 0,
+    lambda = lambda_value,
+    standardize = TRUE
+  )
+  A1_ridge[i, ] <- as.numeric(coef(fit_ridge))[-1]  # remove intercept
+  
+  # Lasso Regression (L1 regularization): alpha = 1
+  fit_lasso <- glmnet(
+    X_lag1_matrix, y_i,
+    alpha = 1,
+    lambda = lambda_value,
+    standardize = TRUE
+  )
+  A1_lasso[i, ] <- as.numeric(coef(fit_lasso))[-1]  # remove intercept
+}
+
+# Construct binary adjacency matrices based on non-zero coefficients
+adjacency_ridge <- (A1_ridge != 0) * 1
+adjacency_lasso <- (A1_lasso != 0) * 1
+
+# Display results
+cat("\n✅ Ridge coefficients:\n")
+print(round(A1_ridge, 2))
+
+cat("\n✅ Lasso coefficients:\n")
+print(round(A1_lasso, 2))
+
+cat("\n📌 Binary adjacency matrix (Ridge):\n")
+print(adjacency_ridge)
+
+cat("\n📌 Binary adjacency matrix (Lasso):\n")
+print(adjacency_lasso)
+
+ # =============================
+# PHASE 4 – Structural Recovery Evaluation
+# =============================
+
+# Function to compute structural recovery metrics
+evaluate_structure <- function(estimated, true) {
+  TP <- sum(estimated == 1 & true == 1)  # True Positives
+  FP <- sum(estimated == 1 & true == 0)  # False Positives
+  FN <- sum(estimated == 0 & true == 1)  # False Negatives
+  TN <- sum(estimated == 0 & true == 0)  # True Negatives
+  
+  sensitivity <- TP / (TP + FN)
+  specificity <- TN / (TN + FP)
+  precision   <- TP / (TP + FP)
+  accuracy    <- (TP + TN) / (TP + FP + FN + TN)
+  f1_score    <- 2 * precision * sensitivity / (precision + sensitivity)
+  
+  return(data.frame(sensitivity, specificity, precision, accuracy, f1_score))
+}
+
+# Use the true coefficient matrix A1 as ground truth
+adjacency_true <- (A1 != 0) * 1
+
+# Evaluate binary recovery performance for each method
+ols_metrics   <- evaluate_structure(adjacency_ols, adjacency_true)
+ridge_metrics <- evaluate_structure(adjacency_ridge, adjacency_true)
+lasso_metrics <- evaluate_structure(adjacency_lasso, adjacency_true)
+
+# Combine results into a single table
+metrics_table <- rbind(
+  OLS   = ols_metrics,
+  Ridge = ridge_metrics,
+  Lasso = lasso_metrics
+)
+
+# Display rounded results
+round(metrics_table, 3)    
+
+# =============================
+# PHASE 5 – Lasso Regularization Tuning
+# =============================
+
+# Load required package
+library(glmnet)
+
+# Select one target variable (e.g., the first time series)
+y_target <- X_response_matrix[, 1]
+
+# --- 1. Cross-Validation to select optimal λ (lambda) for Lasso ---
+
+set.seed(123)  # For reproducibility
+cv_lasso <- cv.glmnet(
+  X_lag1_matrix, y_target,
+  alpha = 1,           # Lasso penalty (L1)
+  nfolds = 10,         # 10-fold cross-validation
+  standardize = TRUE
+)
+
+# Plot cross-validation results
+plot(cv_lasso)
+title("Cross-Validation for Optimal λ (Lasso)", line = 2.5)
+
+# --- 2. Full Lasso path without CV: inspect sparsity structure ---
+
+fit_lasso_path <- glmnet(
+  X_lag1_matrix, y_target,
+  alpha = 1,
+  standardize = TRUE
+)
+
+# Count non-zero coefficients for each lambda
+n_nonzero <- apply(
+  coef(fit_lasso_path)[-1, ],  # Remove intercept
+  2,
+  function(x) sum(x != 0)
+)
+
+# Plot number of non-zero coefficients vs. log(lambda)
+plot(
+  log(fit_lasso_path$lambda), n_nonzero,
+  type = "b", pch = 19,
+  xlab = "log(λ)", ylab = "Number of Non-Zero Coefficients",
+  main = "Sparsity Induced by Lasso"
+)
+
+# Highlight the optimal lambda from CV
+abline(v = log(cv_lasso$lambda.min), col = "red", lty = 2)
+legend(
+  "topright", legend = "Optimal λ",
+  col = "red", lty = 2, bty = "n"
+)
+
+
+This concludes the first stage of the analysis, focused on the generation of synthetic VAR data, the estimation of causal relationships using OLS, Ridge, and Lasso, and the empirical evaluation of structural recovery performance. Cross-validation applied to Lasso has demonstrated its ability to select parsimonious and robust models—crucial for causal discovery in high-dimensional contexts.
+
+From here, we are ready to move forward into more advanced analyses or methodological extensions, such as higher-order VAR models, real-world data, or integration with dimensionality reduction techniques.
+
+
+
+
+# =============================================================================
+# PART II – Neural Network Implementation with Keras in R
+# =============================================================================
+
+# -------------------------------
+# Step 1: Install and configure TensorFlow backend
+# -------------------------------
+
+library(keras)
+
+# This installs TensorFlow version 2.15.0 into a virtual environment named "r-tensorflow"
+install_keras(
+  method = "virtualenv",
+  envname = "r-tensorflow",
+  tensorflow = "2.15.0"
+)
+
+# Activate virtual environment and verify TensorFlow availability
+library(reticulate)
+use_virtualenv("r-tensorflow", required = TRUE)
+
+if (!py_module_available("tensorflow")) {
+  stop("❌ TensorFlow is not available. Please check installation.")
+} else {
+  cat("✅ TensorFlow environment is ready.\n")
+}
+
+# -------------------------------
+# Step 2: Download and explore MNIST dataset
+# -------------------------------
+
+library(keras)
+
+# Load MNIST only if not already loaded
+if (!exists("mnist")) {
+  mnist <- dataset_mnist()
+  cat("✔️ MNIST dataset successfully loaded.\n")
+}
+
+# Display dataset structure (train and test components)
+str(mnist)
+
+
+# =============================================================================
+# PHASE 3 – Visualizing and Inspecting MNIST Raw Data
+# =============================================================================
+
+# Step 3.1 – Visualize training images
+par(mfrow = c(2, 5), mar = c(1, 1, 2, 1))  # Grid: 2 rows x 5 columns
+
+for (i in 1:10) {
+  image(1:28, 1:28, t(apply(mnist$train$x[i, , ], 2, rev)),
+        col = gray.colors(256), axes = FALSE,
+        main = paste("Label:", mnist$train$y[i]))
+}
+
+# Step 3.2 – Structure and pixel range checks
+cat("Training set dimensions:\n")
+print(dim(mnist$train$x))  # Expected: 60000 x 28 x 28
+
+cat("Pixel value range (train):\n")
+print(range(mnist$train$x))
+
+
+# =============================================================================
+# PHASE 4 – Preprocessing MNIST for Neural Network Input
+# =============================================================================
+
+# Step 4.1 – Normalize pixel values to [0, 1]
+x_train <- mnist$train$x / 255
+x_test  <- mnist$test$x / 255
+
+# Step 4.2 – Flatten each 28x28 image into a 784-length vector
+x_train <- array_reshape(x_train, dim = c(nrow(x_train), 28 * 28))
+x_test  <- array_reshape(x_test, dim = c(nrow(x_test), 28 * 28))
+
+# Step 4.3 – One-hot encode the labels (0–9 becomes binary vector length 10)
+y_train <- to_categorical(mnist$train$y, num_classes = 10)
+y_test  <- to_categorical(mnist$test$y, num_classes = 10)
+
+# Step 4.4 – Final structure check
+cat("✅ Shape of x_train:\n")
+print(dim(x_train))  # Expected: 60000 × 784
+
+cat("✅ Shape of y_train:\n")
+print(dim(y_train))  # Expected: 60000 × 10
+
+# ───────────────────────────────────────────────────────────────────────
+# PHASE 5 – Manual Implementation of a Feedforward Neural Network in Base R
+# Goal: Build a basic MLP (Multi-Layer Perceptron) from scratch to classify MNIST digits
+# ───────────────────────────────────────────────────────────────────────
+
+# Step 1 – Define network architecture
+# Architecture: 784 (input) → 128 (hidden) → 10 (output)
+
+input_size  <- 784     # Number of pixels per image (28 × 28)
+hidden_size <- 128     # Hidden layer neurons
+output_size <- 10      # Output classes: digits 0–9
+
+set.seed(123)  # For reproducibility
+
+# Weight and bias initialization
+W1 <- matrix(rnorm(input_size * hidden_size, mean = 0, sd = 0.01), nrow = input_size)
+b1 <- rep(0, hidden_size)
+
+W2 <- matrix(rnorm(hidden_size * output_size, mean = 0, sd = 0.01), nrow = hidden_size)
+b2 <- rep(0, output_size)
+
+cat("✅ Weights and biases initialized.\n")
+
+# Step 2 – Activation functions
+
+# ReLU for the hidden layer
+relu <- function(z) {
+  pmax(0, z)
+}
+
+# Softmax for the output layer
+softmax <- function(z) {
+  exp_z <- exp(z - max(z))  # Numerical stability
+  exp_z / rowSums(exp_z)
+}
+
+cat("✅ Activation functions defined (ReLU and Softmax).\n")
+
+# Step 3 – Loss function: Categorical Cross-Entropy
+
+cross_entropy_loss <- function(y_pred, y_true) {
+  # y_pred: softmax predictions (n × 10)
+  # y_true: one-hot encoded ground truth (n × 10)
+  epsilon <- 1e-8  # Avoid log(0)
+  -sum(y_true * log(y_pred + epsilon)) / nrow(y_true)
+}
+
+cat("✅ Loss function defined (Cross-Entropy).\n")
+
+# Step 4 – Forward propagation
+
+forward_pass <- function(X) {
+  Z1 <- X %*% W1 + matrix(b1, nrow = nrow(X), ncol = length(b1), byrow = TRUE)
+  A1 <- relu(Z1)
+  Z2 <- A1 %*% W2 + matrix(b2, nrow = nrow(A1), ncol = length(b2), byrow = TRUE)
+  A2 <- softmax(Z2)
+
+  list(Z1 = Z1, A1 = A1, Z2 = Z2, A2 = A2)
+}
+
+cat("✅ Forward pass function implemented.\n")
+
+
+# ───────────────────────────────────────────────────────────────
+# PHASE 6 – Backpropagation and Parameter Updates
+# Objective: Implement the backpropagation algorithm to train the Feedforward Neural Network
+# ───────────────────────────────────────────────────────────────
+
+# Step 1 – Derivative of ReLU activation
+relu_derivative <- function(z) {
+  as.numeric(z > 0)
+}
+cat("✅ Step 1: ReLU derivative defined.\n")
+
+# Step 2 – Full backpropagation function
+# Computes gradients for weights and biases given the output of the forward pass
+backward_pass <- function(X, y_true, cache) {
+  m <- nrow(X)  # Number of samples
+  
+  A1 <- cache$A1
+  A2 <- cache$A2
+  Z1 <- cache$Z1
+  
+  # Gradient of output layer
+  dZ2 <- (A2 - y_true) / m
+  dW2 <- t(A1) %*% dZ2
+  db2 <- colSums(dZ2)
+  
+  # Gradient of hidden layer
+  dA1 <- dZ2 %*% t(W2)
+  dZ1 <- dA1 * relu_derivative(Z1)
+  dW1 <- t(X) %*% dZ1
+  db1 <- colSums(dZ1)
+  
+  list(dW1 = dW1, db1 = db1, dW2 = dW2, db2 = db2)
+}
+cat("✅ Step 2: Backpropagation implemented.\n")
+
+# Step 3 – Parameter update using gradient descent
+update_parameters <- function(gradients, learning_rate = 0.01) {
+  W1 <<- W1 - learning_rate * gradients$dW1
+  b1 <<- b1 - learning_rate * gradients$db1
+  W2 <<- W2 - learning_rate * gradients$dW2
+  b2 <<- b2 - learning_rate * gradients$db2
+}
+cat("✅ Step 3: Parameters updated successfully.\n")
+
+
+# ───────────────────────────────────────────────────────────────
+# PHASE 7 – Architecture and Consistency Checks
+# Purpose: Ensure data dimensions and functions are aligned before training
+# ───────────────────────────────────────────────────────────────
+
+# Step 1 – Check training data dimensions
+cat("📦 Step 1: Data shape verification\n")
+cat("Shape of X (train):\n")
+print(dim(x_train))  # Expected: 60000 x 784
+cat("Shape of Y (train):\n")
+print(dim(y_train))  # Expected: 60000 x 10
+
+# Step 2 – Check dimensions of weights and biases
+cat("\n⚙️ Step 2: Weight and bias shapes\n")
+cat("Shape of W1:", dim(W1), "\n")  # Expected: 784 x 128
+cat("Length of b1:", length(b1), "\n")  # Expected: 128
+cat("Shape of W2:", dim(W2), "\n")  # Expected: 128 x 10
+cat("Length of b2:", length(b2), "\n")  # Expected: 10
+
+# Step 2.1 – Redefine ReLU to ensure consistent matrix output
+relu <- function(z) {
+  matrix(pmax(0, z), nrow = nrow(z), ncol = ncol(z))
+}
+cat("\n✅ ReLU redefined to ensure consistent matrix output.\n")
+
+# Step 3 – Run forward pass on a small batch
+cat("\n🧠 Step 3: Test forward_pass on 5 samples\n")
+x_sample <- x_train[1:5, ]
+y_sample <- y_train[1:5, ]
+cache_test <- forward_pass(x_sample)
+
+cat("Predictions (A2 – softmax output):\n")
+print(round(cache_test$A2, 3))
+
+# Step 4 – Evaluate cross-entropy loss on this small batch
+cat("\n📉 Step 4: Loss evaluation\n")
+loss_sample <- cross_entropy_loss(cache_test$A2, y_sample)
+cat("Loss over first 5 samples:", round(loss_sample, 4), "\n")
+
+# ───────────────────────────────────────────────────────────────
+# PHASE 8 – Model evaluation under hyperparameter variation
+# Goal: Explore the sensitivity of the model to learning rate and hidden layer size
+# ───────────────────────────────────────────────────────────────
+
+# Step 1 – Define test configurations
+configs <- list(
+  list(learning_rate = 0.01, hidden_size = 64),
+  list(learning_rate = 0.01, hidden_size = 128),
+  list(learning_rate = 0.001, hidden_size = 64),
+  list(learning_rate = 0.001, hidden_size = 128)
+)
+
+# Step 2 – Parametric forward and backward functions
+
+forward_pass <- function(X, W1, b1, W2, b2) {
+  Z1 <- X %*% W1 + matrix(b1, nrow = nrow(X), ncol = length(b1), byrow = TRUE)
+  A1 <- relu(Z1)
+  Z2 <- A1 %*% W2 + matrix(b2, nrow = nrow(A1), ncol = length(b2), byrow = TRUE)
+  A2 <- softmax(Z2)
+  list(Z1 = Z1, A1 = A1, Z2 = Z2, A2 = A2)
+}
+
+backward_pass <- function(X, y_true, cache, W2) {
+  m <- nrow(X)
+  A1 <- cache$A1
+  A2 <- cache$A2
+  Z1 <- cache$Z1
+
+  dZ2 <- (A2 - y_true) / m
+  dW2 <- t(A1) %*% dZ2
+  db2 <- colSums(dZ2)
+
+  dA1 <- dZ2 %*% t(W2)
+  dZ1 <- dA1 * relu_derivative(Z1)
+  dW1 <- t(X) %*% dZ1
+  db1 <- colSums(dZ1)
+
+  list(dW1 = dW1, db1 = db1, dW2 = dW2, db2 = db2)
+}
+
+# Step 3 – Training function with parameter injection
+
+train_network <- function(x_train, y_train, learning_rate, hidden_size, epochs = 5) {
+  input_size <- ncol(x_train)
+  output_size <- ncol(y_train)
+
+  # Initialize weights and biases
+  W1 <- matrix(rnorm(input_size * hidden_size, 0, 0.01), nrow = input_size)
+  b1 <- rep(0, hidden_size)
+  W2 <- matrix(rnorm(hidden_size * output_size, 0, 0.01), nrow = hidden_size)
+  b2 <- rep(0, output_size)
+
+  # Training loop
+  for (epoch in 1:epochs) {
+    cache <- forward_pass(x_train, W1, b1, W2, b2)
+    loss <- cross_entropy_loss(cache$A2, y_train)
+    grads <- backward_pass(x_train, y_train, cache, W2)
+
+    # Parameter updates (gradient descent)
+    W1 <- W1 - learning_rate * grads$dW1
+    b1 <- b1 - learning_rate * grads$db1
+    W2 <- W2 - learning_rate * grads$dW2
+    b2 <- b2 - learning_rate * grads$db2
+
+    cat(sprintf("Epoch %d | Loss: %.4f\n", epoch, loss))
+  }
+
+  return(loss)
+}
+
+# ───────────────────────────────────────────────────────────────
+# PHASE 8.4 – Evaluation loop over different hyperparameter configurations
+# Goal: Train the network under different settings and compare performance
+# ───────────────────────────────────────────────────────────────
+
+# Step 4 – Loop over configurations and collect results
+results <- data.frame()  # Initialize empty results table
+
+for (cfg in configs) {
+  cat("\n▶ Evaluating configuration:\n")
+  print(cfg)
+
+  # Train model with a subset (1000 samples) for speed
+  loss <- train_network(
+    x_train[1:1000, ], y_train[1:1000, ],
+    learning_rate = cfg$learning_rate,
+    hidden_size = cfg$hidden_size,
+    epochs = 5
+  )
+
+  # Append result to summary table
+  results <- rbind(
+    results,
+    data.frame(
+      learning_rate = cfg$learning_rate,
+      hidden_size = cfg$hidden_size,
+      final_loss = round(loss, 4)
+    )
+  )
+}
+
+# Final report
+cat("\n✅ Hyperparameter evaluation completed.\n")
+print(results)
+
+# ───────────────────────────────────────────────────────────────
+# SECTION D – Step-by-step implementation of Word Embeddings in R
+# Objective: Sentiment classification on IMDb using embedding layers
+# ───────────────────────────────────────────────────────────────
+
+library(keras)
+
+# Step 1 – Load IMDb dataset and pad sequences
+max_features <- 10000  # Vocabulary size
+maxlen <- 200          # Max length of each review (in words)
+
+# Load data (only top max_features words are kept)
+imdb <- dataset_imdb(num_words = max_features)
+
+# Pad sequences to the same length
+x_train <- pad_sequences(imdb$train$x, maxlen = maxlen)
+x_test  <- pad_sequences(imdb$test$x,  maxlen = maxlen)
+y_train <- imdb$train$y
+y_test  <- imdb$test$y
+
+cat("✔️ IMDb dataset loaded and sequences padded.\n")
+
+# Step 2 – Define model architecture with an embedding layer
+model <- keras_model_sequential() %>%
+  layer_embedding(input_dim = max_features, output_dim = 32, input_length = maxlen) %>%
+  layer_flatten() %>%
+  layer_dense(units = 64, activation = "relu") %>%
+  layer_dense(units = 1, activation = "sigmoid")
+
+cat("✅ Model defined with embedding layer.\n")
+
+# Step 3 – Compile model
+model %>% compile(
+  optimizer = "adam",
+  loss = "binary_crossentropy",
+  metrics = "accuracy"
+)
+
+cat("🛠 Model compiled successfully.\n")
+
+# Step 4 – Train model
+history <- model %>% fit(
+  x_train, y_train,
+  epochs = 5,
+  batch_size = 512,
+  validation_split = 0.2
+)
+
+# Step 5 – Evaluate performance on test set
+score <- model %>% evaluate(x_test, y_test)
+cat(sprintf("🔍 Test accuracy: %.2f%%\n", score[2] * 100))
+cat(sprintf("📉 Test loss: %.4f\n", score[1]))
+
+# Step 6 – Plot training history
+plot(history)
+
+# ───────────────────────────────────────────────────────────────
+# Plotting Training Metrics from keras::fit() object using ggplot2
+# ───────────────────────────────────────────────────────────────
+
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+library(patchwork)
+
+# Step 1 – Convert training history into a data frame
+df <- as.data.frame(history$metrics)
+df$epoch <- seq_len(nrow(df))
+
+# Step 2 – Reshape for loss plot
+loss_df <- df %>%
+  select(epoch, loss, val_loss) %>%
+  pivot_longer(cols = -epoch, names_to = "metric", values_to = "value")
+
+# Step 3 – Reshape for accuracy plot
+acc_df <- df %>%
+  select(epoch, accuracy, val_accuracy) %>%
+  pivot_longer(cols = -epoch, names_to = "metric", values_to = "value")
+
+# Step 4 – Plot loss over epochs
+p1 <- ggplot(loss_df, aes(x = epoch, y = value, color = metric)) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  labs(title = "Loss over Epochs", y = "Loss", x = NULL) +
+  theme_minimal(base_size = 13) +
+  theme(
+    legend.position = "bottom",
+    legend.title = element_blank()
+  )
+
+# Step 5 – Plot accuracy over epochs
+p2 <- ggplot(acc_df, aes(x = epoch, y = value, color = metric)) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  labs(title = "Accuracy over Epochs", y = "Accuracy", x = "Epoch") +
+  theme_minimal(base_size = 13) +
+  theme(
+    legend.position = "bottom",
+    legend.title = element_blank()
+  )
+
+# Step 6 – Combine both plots vertically using patchwork
+combined <- p1 / p2 +
+  plot_layout(guides = "collect") &
+  theme(legend.position = "bottom")
+
+# Display final visualization
+print(combined)
